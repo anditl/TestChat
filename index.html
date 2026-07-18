@@ -114,6 +114,19 @@
     gap: 20px;
   }
 
+  #name-card{
+    margin-bottom: 4px;
+  }
+  #name-card h2{
+    margin: 0 0 2px 0;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  #participants-label{ color: var(--accent); }
+
   /* ---------- Setup Screen (Option A / B) ---------- */
   #setup{
     display: grid;
@@ -361,13 +374,19 @@
 
 <main>
 
+  <!-- Anzeigename, gilt für beide Optionen -->
+  <div class="card" id="name-card">
+    <h2>Dein Name</h2>
+    <input type="text" id="name-input" placeholder="z. B. Alex" maxlength="20">
+  </div>
+
   <!-- ============ SETUP-BEREICH: verschwindet, sobald verbunden ============ -->
   <section id="setup">
 
     <!-- Option A: Raum erstellen (Host) -->
     <div class="card">
       <h2>Option A <span class="badge">Host</span></h2>
-      <p class="desc">Erstelle einen neuen Raum. Du erhältst eine eindeutige Raum-ID, die du an deinen Chat-Partner weitergibst.</p>
+      <p class="desc">Erstelle einen neuen Raum. Weitere Teilnehmer können jederzeit mit der Raum-ID beitreten - nicht nur eine einzelne Person.</p>
       <button id="create-room-btn" class="btn-primary">Raum erstellen</button>
 
       <div id="my-id-box">
@@ -392,7 +411,7 @@
   <!-- ============ CHAT-BEREICH: erscheint nach erfolgreicher Verbindung ============ -->
   <section id="chat-section">
     <div id="chat-header">
-      <span>Verbunden mit <strong id="peer-id-label">–</strong></span>
+      <span>Teilnehmer: <strong id="participants-label">–</strong></span>
       <button id="leave-btn">Verlassen</button>
     </div>
     <div id="messages"></div>
@@ -409,23 +428,39 @@
 <script>
 (() => {
   // ---------------------------------------------------------------------
-  // GRUNDPRINZIP:
-  // PeerJS kapselt WebRTC. Jeder Browser-Tab bekommt eine eigene "Peer"-
-  // Instanz mit einer eindeutigen ID. Der Host erzeugt seine Peer-Instanz
-  // ohne feste ID (PeerJS generiert eine zufällige) und wartet auf
-  // eingehende Verbindungen ("connection"-Event). Der Guest erzeugt
-  // ebenfalls eine eigene Peer-Instanz und ruft peer.connect(hostId) auf,
-  // um sich mit dem Host zu verbinden. Der eigentliche Datentransfer
-  // (Chat-Nachrichten) läuft danach direkt Peer-zu-Peer über einen
-  // "DataConnection" - der PeerJS-Cloud-Server wird nur für den initialen
-  // Verbindungsaufbau (Signaling) gebraucht, nicht für die Nachrichten selbst.
+  // GRUNDPRINZIP (jetzt für MEHRERE Teilnehmer, nicht nur 2):
+  //
+  // Wir nutzen eine STERN-TOPOLOGIE: Der Host ist die Zentrale, jeder Guest
+  // verbindet sich nur mit dem Host - nicht mit den anderen Guests direkt.
+  // Das hält den Verbindungsaufbau einfach (jeder braucht nur EINE
+  // Verbindung, egal wie viele Teilnehmer im Raum sind).
+  //
+  // Der Host führt eine Liste "connections" mit allen verbundenen Guests.
+  // Schickt ein Guest eine Nachricht, kommt sie zuerst beim Host an. Der
+  // Host zeigt sie selbst an UND leitet sie an ALLE ANDEREN Guests weiter
+  // ("relay"). So sehen am Ende alle Teilnehmer jede Nachricht, obwohl
+  // technisch nur der Host mit jedem einzeln verbunden ist.
+  //
+  // Jede Nachricht trägt eine eindeutige ID (msgId), damit ein Guest eine
+  // vom Host zurück-relayte eigene Nachricht nicht doppelt anzeigt.
   // ---------------------------------------------------------------------
 
-  let peer = null;        // Die eigene PeerJS-Instanz
-  let conn = null;         // Die aktive Verbindung zum Chat-Partner
+  let peer = null;               // Die eigene PeerJS-Instanz
   let isHost = false;
 
+  // HOST: eine offene Verbindung pro Guest, Key = Guest-Peer-ID
+  const hostConnections = new Map();   // peerId -> DataConnection
+  const participantNames = new Map();  // peerId -> Anzeigename
+
+  // GUEST: nur eine einzige Verbindung, nämlich zum Host
+  let guestConn = null;
+
+  let myName = 'Ich';
+  const myMsgIds = new Set(); // eigene gesendete msgIds, um Echo zu erkennen
+
   // --- DOM-Referenzen ---
+  const nameInput = document.getElementById('name-input');
+
   const createRoomBtn = document.getElementById('create-room-btn');
   const myIdBox = document.getElementById('my-id-box');
   const myIdDisplay = document.getElementById('my-id-display');
@@ -437,7 +472,7 @@
 
   const setupSection = document.getElementById('setup');
   const chatSection = document.getElementById('chat-section');
-  const peerIdLabel = document.getElementById('peer-id-label');
+  const participantsLabel = document.getElementById('participants-label');
   const leaveBtn = document.getElementById('leave-btn');
 
   const messagesEl = document.getElementById('messages');
@@ -452,6 +487,10 @@
   const roomFromUrl = urlParams.get('room');
   if (roomFromUrl) {
     joinIdInput.value = roomFromUrl;
+  }
+
+  function genId() {
+    return Math.random().toString(36).slice(2) + Date.now().toString(36);
   }
 
   function setStatus(state, text) {
@@ -478,10 +517,9 @@
     return div.innerHTML;
   }
 
-  function showChatUI(remoteId) {
+  function showChatUI() {
     setupSection.style.display = 'none';
     chatSection.style.display = 'flex';
-    peerIdLabel.textContent = remoteId;
     msgInput.disabled = false;
     sendBtn.disabled = false;
     msgInput.focus();
@@ -496,37 +534,15 @@
     setStatus('idle', 'Nicht verbunden');
   }
 
-  // -----------------------------------------------------------------
-  // Gemeinsame Logik, sobald eine DataConnection (egal ob Host oder
-  // Guest) steht: Event-Listener registrieren.
-  // -----------------------------------------------------------------
-  function wireUpConnection(connection) {
-    conn = connection;
-
-    conn.on('open', () => {
-      setStatus('connected', 'Verbunden mit ' + conn.peer);
-      showChatUI(conn.peer);
-      addMessage('Verbindung hergestellt.', 'system');
-    });
-
-    // Eingehende Nachrichten des Partners anzeigen
-    conn.on('data', (data) => {
-      if (data && data.type === 'chat') {
-        addMessage(data.text, 'other');
-      }
-    });
-
-    conn.on('close', () => {
-      setStatus('disconnected', 'Verbindung getrennt');
-      addMessage('Dein Chat-Partner hat die Verbindung beendet.', 'system');
-      msgInput.disabled = true;
-      sendBtn.disabled = true;
-    });
-
-    conn.on('error', (err) => {
-      console.error('Connection error:', err);
-      setStatus('disconnected', 'Verbindungsfehler');
-    });
+  // Aktualisiert die Teilnehmerliste im Chat-Header (nur Namen, kommasepariert)
+  function updateParticipantsLabel() {
+    let names;
+    if (isHost) {
+      names = [myName + ' (Du)', ...Array.from(participantNames.values())];
+    } else {
+      names = [myName + ' (Du)', ...Array.from(participantNames.values())];
+    }
+    participantsLabel.textContent = names.join(', ');
   }
 
   // -----------------------------------------------------------------
@@ -534,6 +550,7 @@
   // -----------------------------------------------------------------
   createRoomBtn.addEventListener('click', () => {
     isHost = true;
+    myName = nameInput.value.trim() || 'Host';
     createRoomBtn.disabled = true;
     createRoomBtn.textContent = 'Erstelle Raum...';
 
@@ -546,16 +563,32 @@
       myIdBox.style.display = 'flex';
       createRoomBtn.textContent = 'Raum erstellt ✓';
       setStatus('waiting', 'Warte auf Teilnehmer...');
+      showChatUI();
+      updateParticipantsLabel();
+      addMessage('Raum erstellt. Teile die Raum-ID, damit andere beitreten können.', 'system');
     });
 
-    // 'connection' feuert, sobald sich ein Guest mit peer.connect(unsereId) verbindet
+    // 'connection' feuert JEDES MAL, wenn sich ein neuer Guest verbindet
+    // (nicht nur beim ersten - deshalb kein "schon belegt"-Check mehr)
     peer.on('connection', (incomingConn) => {
-      // Falls schon jemand verbunden ist, weitere Verbindungen ablehnen
-      if (conn && conn.open) {
-        incomingConn.close();
-        return;
-      }
-      wireUpConnection(incomingConn);
+      hostConnections.set(incomingConn.peer, incomingConn);
+
+      incomingConn.on('open', () => {
+        setStatus('connected', hostConnections.size + ' Teilnehmer verbunden');
+      });
+
+      incomingConn.on('data', (data) => handleIncomingAsHost(incomingConn, data));
+
+      incomingConn.on('close', () => {
+        const name = participantNames.get(incomingConn.peer) || 'Ein Teilnehmer';
+        hostConnections.delete(incomingConn.peer);
+        participantNames.delete(incomingConn.peer);
+        updateParticipantsLabel();
+        addMessage(name + ' hat den Raum verlassen.', 'system');
+        broadcastFromHost({ type: 'system', text: name + ' hat den Raum verlassen.', msgId: genId() }, incomingConn.peer);
+        setStatus(hostConnections.size > 0 ? 'connected' : 'waiting',
+          hostConnections.size > 0 ? hostConnections.size + ' Teilnehmer verbunden' : 'Warte auf Teilnehmer...');
+      });
     });
 
     peer.on('error', (err) => {
@@ -563,6 +596,36 @@
       setStatus('disconnected', 'Fehler: ' + err.type);
     });
   });
+
+  // Verarbeitet Daten, die beim HOST von einem Guest eintreffen
+  function handleIncomingAsHost(fromConn, data) {
+    if (!data) return;
+
+    if (data.type === 'hello') {
+      // Guest stellt sich mit seinem Namen vor
+      participantNames.set(fromConn.peer, data.name);
+      updateParticipantsLabel();
+      addMessage(data.name + ' ist dem Raum beigetreten.', 'system');
+      // Allen anderen Bescheid geben + dem neuen Guest die aktuelle Teilnehmerliste schicken
+      broadcastFromHost({ type: 'system', text: data.name + ' ist dem Raum beigetreten.', msgId: genId() }, fromConn.peer);
+      fromConn.send({ type: 'roster', names: Array.from(participantNames.values()).concat(myName) });
+      return;
+    }
+
+    if (data.type === 'chat') {
+      const senderName = participantNames.get(fromConn.peer) || 'Unbekannt';
+      addMessage(data.text, 'other', senderName);
+      // An alle ANDEREN Guests weiterleiten (Sender ausgeschlossen)
+      broadcastFromHost(data, fromConn.peer);
+    }
+  }
+
+  // Schickt eine Nachricht an alle verbundenen Guests, optional einen ausschließen
+  function broadcastFromHost(data, excludePeerId) {
+    hostConnections.forEach((c, peerId) => {
+      if (peerId !== excludePeerId && c.open) c.send(data);
+    });
+  }
 
   copyIdBtn.addEventListener('click', () => {
     navigator.clipboard.writeText(myIdDisplay.textContent).then(() => {
@@ -592,6 +655,7 @@
     if (!targetId) return;
 
     isHost = false;
+    myName = nameInput.value.trim() || 'Gast';
     joinRoomBtn.disabled = true;
     joinRoomBtn.textContent = 'Verbinde...';
     setStatus('waiting', 'Verbinde mit Raum...');
@@ -600,9 +664,25 @@
     peer = new Peer();
 
     peer.on('open', () => {
-      // Aktive Verbindung zum Host über dessen Raum-ID aufbauen
-      const connection = peer.connect(targetId, { reliable: true });
-      wireUpConnection(connection);
+      // Aktive Verbindung NUR zum Host aufbauen (Stern-Topologie)
+      guestConn = peer.connect(targetId, { reliable: true });
+
+      guestConn.on('open', () => {
+        setStatus('connected', 'Verbunden mit Raum ' + targetId);
+        showChatUI();
+        addMessage('Verbindung hergestellt.', 'system');
+        // Uns beim Host mit unserem Namen vorstellen
+        guestConn.send({ type: 'hello', name: myName });
+      });
+
+      guestConn.on('data', (data) => handleIncomingAsGuest(data));
+
+      guestConn.on('close', () => {
+        setStatus('disconnected', 'Verbindung zum Host getrennt');
+        addMessage('Die Verbindung zum Host wurde beendet.', 'system');
+        msgInput.disabled = true;
+        sendBtn.disabled = true;
+      });
     });
 
     peer.on('error', (err) => {
@@ -613,15 +693,50 @@
     });
   }
 
+  // Verarbeitet Daten, die beim GUEST vom Host eintreffen
+  // (der Host leitet hier auch Nachrichten anderer Guests durch)
+  function handleIncomingAsGuest(data) {
+    if (!data) return;
+
+    if (data.type === 'roster') {
+      // Host schickt uns die Namen aller aktuell im Raum
+      participantNames.clear();
+      data.names.filter(n => n !== myName).forEach((n, i) => participantNames.set('other-' + i, n));
+      updateParticipantsLabel();
+      return;
+    }
+
+    if (data.type === 'system') {
+      addMessage(data.text, 'system');
+      return;
+    }
+
+    if (data.type === 'chat') {
+      // Eigene Nachricht, die der Host nur zur Info zurückschickt? -> nicht doppelt anzeigen
+      if (myMsgIds.has(data.msgId)) return;
+      addMessage(data.text, 'other', data.senderName);
+    }
+  }
+
   // -----------------------------------------------------------------
-  // Nachrichten senden
+  // Nachrichten senden (funktioniert identisch für Host und Guest)
   // -----------------------------------------------------------------
   function sendMessage() {
     const text = msgInput.value.trim();
-    if (!text || !conn || !conn.open) return;
+    if (!text) return;
 
-    // Nachricht über die DataConnection direkt an den Partner senden
-    conn.send({ type: 'chat', text: text });
+    const msgId = genId();
+    const payload = { type: 'chat', text: text, senderName: myName, msgId: msgId };
+
+    if (isHost) {
+      // Host zeigt die Nachricht direkt an und broadcastet an alle Guests
+      broadcastFromHost(payload, null);
+    } else {
+      if (!guestConn || !guestConn.open) return;
+      myMsgIds.add(msgId);
+      guestConn.send(payload); // geht zum Host, der leitet an alle anderen weiter
+    }
+
     addMessage(text, 'me');
     msgInput.value = '';
     msgInput.focus();
@@ -636,10 +751,13 @@
   // Raum verlassen / Verbindung beenden
   // -----------------------------------------------------------------
   leaveBtn.addEventListener('click', () => {
-    if (conn) conn.close();
+    hostConnections.forEach((c) => c.close());
+    hostConnections.clear();
+    participantNames.clear();
+    if (guestConn) guestConn.close();
     if (peer) peer.destroy();
     peer = null;
-    conn = null;
+    guestConn = null;
     createRoomBtn.disabled = false;
     createRoomBtn.textContent = 'Raum erstellen';
     joinRoomBtn.disabled = false;
