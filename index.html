@@ -279,7 +279,76 @@
     color: var(--accent);
   }
 
+  #call-bar{
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
   #chat-header strong{ color: var(--text); }
+
+  .call-btn{
+    padding: 6px 10px;
+    font-size: 0.78rem;
+  }
+  .call-btn.danger{
+    background: transparent;
+    border: 1px solid rgba(255,107,107,0.35);
+    color: var(--danger);
+  }
+  .call-btn.danger:hover{ background: rgba(255,107,107,0.1); }
+
+  /* ---------- Video-/Audio-Anruf-Kacheln ---------- */
+  #call-grid{
+    display: none;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px;
+    padding: 12px;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+  }
+  #call-grid.active{ display: grid; }
+
+  .call-tile{
+    position: relative;
+    aspect-ratio: 4 / 3;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .call-tile video{
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .call-tile.local video{ transform: scaleX(-1); }
+  .call-tile .tile-label{
+    position: absolute;
+    bottom: 6px;
+    left: 8px;
+    font-size: 0.68rem;
+    background: rgba(0,0,0,0.55);
+    color: #fff;
+    padding: 2px 7px;
+    border-radius: 6px;
+  }
+
+  /* ---------- Bild-Nachrichten im Chat ---------- */
+  .msg img{
+    display: block;
+    max-width: 220px;
+    max-height: 260px;
+    border-radius: 10px;
+    margin-bottom: 2px;
+    cursor: zoom-in;
+  }
+
+  #image-btn{
+    padding: 12px 14px;
+    flex-shrink: 0;
+  }
 
   #leave-btn{
     background: transparent;
@@ -422,10 +491,20 @@
         <button id="copy-id-chat-btn" class="btn-secondary" style="padding:3px 8px; font-size:0.72rem; margin-left:6px;">Kopieren</button>
       </span>
       <span id="participants-row">Teilnehmer: <strong id="participants-label">–</strong></span>
+      <span id="call-bar">
+        <button id="start-audio-call-btn" class="btn-secondary call-btn" title="Audio-Anruf">🎤 Anruf</button>
+        <button id="start-video-call-btn" class="btn-secondary call-btn" title="Video-Anruf">🎥 Video</button>
+        <button id="toggle-mute-btn" class="btn-secondary call-btn" style="display:none;">🔇 Stumm</button>
+        <button id="toggle-video-btn" class="btn-secondary call-btn" style="display:none;">📷 Video aus</button>
+        <button id="end-call-btn" class="call-btn danger" style="display:none;">📞 Auflegen</button>
+      </span>
       <button id="leave-btn">Verlassen</button>
     </div>
+    <div id="call-grid"></div>
     <div id="messages"></div>
     <div id="input-row">
+      <input type="file" id="image-input" accept="image/*" style="display:none;">
+      <button id="image-btn" class="btn-secondary" disabled title="Bild senden">📎</button>
       <input type="text" id="msg-input" placeholder="Nachricht schreiben..." disabled>
       <button id="send-btn" class="btn-primary" disabled>Senden</button>
     </div>
@@ -491,6 +570,15 @@
   const messagesEl = document.getElementById('messages');
   const msgInput = document.getElementById('msg-input');
   const sendBtn = document.getElementById('send-btn');
+  const imageInput = document.getElementById('image-input');
+  const imageBtn = document.getElementById('image-btn');
+
+  const callGrid = document.getElementById('call-grid');
+  const startAudioCallBtn = document.getElementById('start-audio-call-btn');
+  const startVideoCallBtn = document.getElementById('start-video-call-btn');
+  const toggleMuteBtn = document.getElementById('toggle-mute-btn');
+  const toggleVideoBtn = document.getElementById('toggle-video-btn');
+  const endCallBtn = document.getElementById('end-call-btn');
 
   const statusBadge = document.getElementById('status-badge');
   const statusText = document.getElementById('status-text');
@@ -535,6 +623,7 @@
     chatSection.style.display = 'flex';
     msgInput.disabled = false;
     sendBtn.disabled = false;
+    imageBtn.disabled = false;
     msgInput.focus();
   }
 
@@ -543,6 +632,7 @@
     setupSection.style.display = 'grid';
     msgInput.disabled = true;
     sendBtn.disabled = true;
+    imageBtn.disabled = true;
     messagesEl.innerHTML = '';
     setStatus('idle', 'Nicht verbunden');
   }
@@ -558,6 +648,257 @@
     participantsLabel.textContent = names.join(', ');
   }
 
+  // ===================================================================
+  // BILDER SENDEN
+  // Bilder werden über dieselbe DataConnection wie Text-Nachrichten
+  // verschickt (als Base64-Data-URL) - beim Host ebenfalls per
+  // broadcastFromHost() an alle anderen weitergeleitet. Vor dem Versand
+  // wird das Bild über ein <canvas> verkleinert, damit auch Fotos direkt
+  // aus der Handykamera (mehrere MB) nicht die Verbindung verstopfen.
+  // ===================================================================
+  imageBtn.addEventListener('click', () => imageInput.click());
+
+  imageInput.addEventListener('change', () => {
+    const file = imageInput.files[0];
+    if (!file) return;
+
+    resizeImageToDataUrl(file, 1280, 0.7).then((dataUrl) => {
+      const msgId = genId();
+      const payload = { type: 'image', dataUrl: dataUrl, senderName: myName, msgId: msgId };
+
+      if (isHost) {
+        broadcastFromHost(payload, null);
+      } else {
+        if (!guestConn || !guestConn.open) return;
+        myMsgIds.add(msgId);
+        guestConn.send(payload);
+      }
+      addImageMessage(dataUrl, 'me', null);
+    }).catch((err) => {
+      console.error('Bildfehler:', err);
+      alert('Das Bild konnte nicht gelesen werden.');
+    });
+
+    imageInput.value = ''; // zurücksetzen, damit dasselbe Bild erneut wählbar ist
+  });
+
+  // Liest die Datei ein und skaliert sie via Canvas auf maxDim Pixel herunter
+  function resizeImageToDataUrl(file, maxDim, quality) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          let width = img.width;
+          let height = img.height;
+          if (width > maxDim || height > maxDim) {
+            const scale = maxDim / Math.max(width, height);
+            width = Math.round(width * scale);
+            height = Math.round(height * scale);
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', quality));
+        };
+        img.onerror = reject;
+        img.src = reader.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function addImageMessage(dataUrl, type, senderLabel) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + type;
+    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.alt = 'Gesendetes Bild';
+    img.title = 'Klicken zum Vergrößern';
+    img.addEventListener('click', () => window.open(dataUrl, '_blank'));
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = (senderLabel ? senderLabel + ' · ' : '') + time;
+    el.appendChild(img);
+    el.appendChild(meta);
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  // ===================================================================
+  // ANRUFE (Audio/Video) über PeerJS MediaConnection
+  //
+  // Wichtig: Das ist UNABHÄNGIG von der Chat-DataConnection. Für Anrufe
+  // ruft jeder Teilnehmer jeden anderen Teilnehmer DIREKT per
+  // peer.call(zielId, eigenerStream) an - dafür braucht man nur die
+  // Peer-ID des Ziels, keine vorher bestehende Verbindung. Deshalb war
+  // es wichtig, dass das Roster echte Peer-IDs enthält (siehe oben).
+  // Bei mehreren Teilnehmern entsteht so ein Mesh nur für die Medien-
+  // Streams, während der Text-/Bild-Chat weiter über den Host läuft.
+  // ===================================================================
+  let localStream = null;
+  let callActive = false;
+  let callHasVideo = false;
+  const mediaConnections = new Map(); // peerId -> MediaConnection
+  const remoteTiles = new Map();      // peerId -> Kachel-<div> im Call-Grid
+
+  startAudioCallBtn.addEventListener('click', () => startCall(false));
+  startVideoCallBtn.addEventListener('click', () => startCall(true));
+  endCallBtn.addEventListener('click', endCall);
+
+  toggleMuteBtn.addEventListener('click', () => {
+    if (!localStream) return;
+    const track = localStream.getAudioTracks()[0];
+    if (!track) return;
+    track.enabled = !track.enabled;
+    toggleMuteBtn.textContent = track.enabled ? '🔇 Stumm' : '🔈 Stumm aufheben';
+  });
+
+  toggleVideoBtn.addEventListener('click', () => {
+    if (!localStream) return;
+    const track = localStream.getVideoTracks()[0];
+    if (!track) return;
+    track.enabled = !track.enabled;
+    toggleVideoBtn.textContent = track.enabled ? '📷 Video aus' : '📷 Video an';
+  });
+
+  // Registriert den Handler für EINGEHENDE Anrufe. Wird direkt nach dem
+  // Erstellen der eigenen Peer-Instanz aufgerufen (für Host UND Guest).
+  function attachCallHandling() {
+    peer.on('call', async (incomingCall) => {
+      const callerName = participantNames.get(incomingCall.peer) || 'Jemand';
+      const wantsVideo = !!(incomingCall.metadata && incomingCall.metadata.video);
+      const accept = window.confirm(callerName + ' ruft dich an (' + (wantsVideo ? 'Video' : 'Audio') + '). Anruf annehmen?');
+      if (!accept) {
+        incomingCall.close();
+        return;
+      }
+      try {
+        if (!localStream) {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: wantsVideo });
+          callHasVideo = wantsVideo;
+          showLocalTile();
+        }
+        incomingCall.answer(localStream);
+        wireUpMediaConnection(incomingCall);
+        enterCallUI();
+      } catch (err) {
+        console.error('Mikrofon/Kamera-Fehler:', err);
+        alert('Konnte nicht auf Mikrofon/Kamera zugreifen.');
+        incomingCall.close();
+      }
+    });
+  }
+
+  async function startCall(withVideo) {
+    try {
+      if (!localStream) {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: withVideo });
+        callHasVideo = withVideo;
+        showLocalTile();
+      }
+      enterCallUI();
+      // Jeden aktuell bekannten Teilnehmer direkt anrufen
+      participantNames.forEach((name, peerId) => {
+        if (mediaConnections.has(peerId)) return;
+        const call = peer.call(peerId, localStream, { metadata: { video: withVideo } });
+        wireUpMediaConnection(call);
+      });
+    } catch (err) {
+      console.error('Mikrofon/Kamera-Fehler:', err);
+      alert('Konnte nicht auf Mikrofon/Kamera zugreifen. Bitte Berechtigung erlauben.');
+    }
+  }
+
+  function wireUpMediaConnection(call) {
+    mediaConnections.set(call.peer, call);
+    call.on('stream', (remoteStream) => addOrUpdateRemoteTile(call.peer, remoteStream));
+    call.on('close', () => {
+      removeRemoteTile(call.peer);
+      mediaConnections.delete(call.peer);
+    });
+    call.on('error', (err) => console.error('Call error:', err));
+  }
+
+  function showLocalTile() {
+    if (document.getElementById('local-tile')) return;
+    const tile = document.createElement('div');
+    tile.className = 'call-tile local';
+    tile.id = 'local-tile';
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.muted = true; // eigenes Mikro nicht auf sich selbst zurückgeben
+    video.playsInline = true;
+    video.srcObject = localStream;
+    const label = document.createElement('span');
+    label.className = 'tile-label';
+    label.textContent = myName + ' (Du)';
+    tile.appendChild(video);
+    tile.appendChild(label);
+    callGrid.appendChild(tile);
+  }
+
+  function addOrUpdateRemoteTile(peerId, stream) {
+    let tile = remoteTiles.get(peerId);
+    if (!tile) {
+      tile = document.createElement('div');
+      tile.className = 'call-tile';
+      const video = document.createElement('video');
+      video.autoplay = true;
+      video.playsInline = true;
+      const label = document.createElement('span');
+      label.className = 'tile-label';
+      label.textContent = participantNames.get(peerId) || 'Teilnehmer';
+      tile.appendChild(video);
+      tile.appendChild(label);
+      callGrid.appendChild(tile);
+      remoteTiles.set(peerId, tile);
+    }
+    tile.querySelector('video').srcObject = stream;
+  }
+
+  function removeRemoteTile(peerId) {
+    const tile = remoteTiles.get(peerId);
+    if (tile) {
+      tile.remove();
+      remoteTiles.delete(peerId);
+    }
+  }
+
+  function enterCallUI() {
+    callActive = true;
+    callGrid.classList.add('active');
+    startAudioCallBtn.style.display = 'none';
+    startVideoCallBtn.style.display = 'none';
+    toggleMuteBtn.style.display = 'inline-flex';
+    toggleVideoBtn.style.display = callHasVideo ? 'inline-flex' : 'none';
+    endCallBtn.style.display = 'inline-flex';
+  }
+
+  function endCall() {
+    mediaConnections.forEach((c) => c.close());
+    mediaConnections.clear();
+    remoteTiles.forEach((tile) => tile.remove());
+    remoteTiles.clear();
+    const localTile = document.getElementById('local-tile');
+    if (localTile) localTile.remove();
+    if (localStream) {
+      localStream.getTracks().forEach((t) => t.stop());
+      localStream = null;
+    }
+    callActive = false;
+    callHasVideo = false;
+    callGrid.classList.remove('active');
+    startAudioCallBtn.style.display = 'inline-flex';
+    startVideoCallBtn.style.display = 'inline-flex';
+    toggleMuteBtn.style.display = 'none';
+    toggleVideoBtn.style.display = 'none';
+    endCallBtn.style.display = 'none';
+  }
+
   // -----------------------------------------------------------------
   // OPTION A: Raum erstellen (Host)
   // -----------------------------------------------------------------
@@ -569,6 +910,7 @@
 
     // Neue Peer-Instanz ohne feste ID -> PeerJS-Server generiert eine zufällige ID
     peer = new Peer();
+    attachCallHandling(); // Handler für eingehende Anrufe registrieren
 
     // 'open' feuert, sobald der Signaling-Server uns eine ID zugewiesen hat
     peer.on('open', (id) => {
@@ -602,6 +944,13 @@
         updateParticipantsLabel();
         addMessage(name + ' hat den Raum verlassen.', 'system');
         broadcastFromHost({ type: 'system', text: name + ' hat den Raum verlassen.', msgId: genId() }, incomingConn.peer);
+        broadcastRoster();
+        // Falls diese Person noch in einem Anruf war, deren Kachel entfernen
+        removeRemoteTile(incomingConn.peer);
+        if (mediaConnections.has(incomingConn.peer)) {
+          mediaConnections.get(incomingConn.peer).close();
+          mediaConnections.delete(incomingConn.peer);
+        }
         setStatus(hostConnections.size > 0 ? 'connected' : 'waiting',
           hostConnections.size > 0 ? hostConnections.size + ' Teilnehmer verbunden' : 'Warte auf Teilnehmer...');
       });
@@ -622,9 +971,16 @@
       participantNames.set(fromConn.peer, data.name);
       updateParticipantsLabel();
       addMessage(data.name + ' ist dem Raum beigetreten.', 'system');
-      // Allen anderen Bescheid geben + dem neuen Guest die aktuelle Teilnehmerliste schicken
+      // Allen anderen Bescheid geben + aktualisierte Teilnehmerliste (mit echten Peer-IDs) an alle senden
       broadcastFromHost({ type: 'system', text: data.name + ' ist dem Raum beigetreten.', msgId: genId() }, fromConn.peer);
-      fromConn.send({ type: 'roster', names: Array.from(participantNames.values()).concat(myName) });
+      broadcastRoster();
+      return;
+    }
+
+    if (data.type === 'image') {
+      const senderName = participantNames.get(fromConn.peer) || 'Unbekannt';
+      addImageMessage(data.dataUrl, 'other', senderName);
+      broadcastFromHost(data, fromConn.peer);
       return;
     }
 
@@ -641,6 +997,16 @@
     hostConnections.forEach((c, peerId) => {
       if (peerId !== excludePeerId && c.open) c.send(data);
     });
+  }
+
+  // Verschickt an alle Guests die vollständige Teilnehmerliste MIT echten
+  // Peer-IDs (nicht nur Namen). Die echten IDs werden gebraucht, damit
+  // Guests sich später für Anrufe direkt per peer.call(id, ...) erreichen
+  // können, auch wenn sie über die Daten-Verbindung nur mit dem Host reden.
+  function broadcastRoster() {
+    const participants = Array.from(participantNames.entries()).map(([id, name]) => ({ id, name }));
+    participants.push({ id: peer.id, name: myName }); // Host selbst mit aufnehmen
+    hostConnections.forEach((c) => { if (c.open) c.send({ type: 'roster', participants }); });
   }
 
   copyIdChatBtn.addEventListener('click', () => {
@@ -685,6 +1051,7 @@
 
     // Eigene Peer-Instanz erstellen (ebenfalls mit zufälliger ID)
     peer = new Peer();
+    attachCallHandling(); // Handler für eingehende Anrufe registrieren
 
     peer.on('open', () => {
       // Aktive Verbindung NUR zum Host aufbauen (Stern-Topologie)
@@ -722,15 +1089,23 @@
     if (!data) return;
 
     if (data.type === 'roster') {
-      // Host schickt uns die Namen aller aktuell im Raum
+      // Host schickt uns Namen + echte Peer-IDs aller aktuell im Raum (inkl. Host)
       participantNames.clear();
-      data.names.filter(n => n !== myName).forEach((n, i) => participantNames.set('other-' + i, n));
+      data.participants.forEach((p) => {
+        if (p.id !== peer.id) participantNames.set(p.id, p.name);
+      });
       updateParticipantsLabel();
       return;
     }
 
     if (data.type === 'system') {
       addMessage(data.text, 'system');
+      return;
+    }
+
+    if (data.type === 'image') {
+      if (myMsgIds.has(data.msgId)) return;
+      addImageMessage(data.dataUrl, 'other', data.senderName);
       return;
     }
 
@@ -774,6 +1149,7 @@
   // Raum verlassen / Verbindung beenden
   // -----------------------------------------------------------------
   leaveBtn.addEventListener('click', () => {
+    endCall();
     hostConnections.forEach((c) => c.close());
     hostConnections.clear();
     participantNames.clear();
