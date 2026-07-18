@@ -266,10 +266,17 @@
     padding: 14px 18px;
     border-bottom: 1px solid var(--border);
     display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
     justify-content: space-between;
     align-items: center;
     font-size: 0.85rem;
     color: var(--text-dim);
+  }
+
+  #room-id-in-chat{
+    font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+    color: var(--accent);
   }
 
   #chat-header strong{ color: var(--text); }
@@ -411,7 +418,10 @@
   <!-- ============ CHAT-BEREICH: erscheint nach erfolgreicher Verbindung ============ -->
   <section id="chat-section">
     <div id="chat-header">
-      <span>Teilnehmer: <strong id="participants-label">–</strong></span>
+      <span id="room-id-row" style="display:none;">Raum-ID: <strong id="room-id-in-chat">–</strong>
+        <button id="copy-id-chat-btn" class="btn-secondary" style="padding:3px 8px; font-size:0.72rem; margin-left:6px;">Kopieren</button>
+      </span>
+      <span id="participants-row">Teilnehmer: <strong id="participants-label">–</strong></span>
       <button id="leave-btn">Verlassen</button>
     </div>
     <div id="messages"></div>
@@ -472,6 +482,9 @@
 
   const setupSection = document.getElementById('setup');
   const chatSection = document.getElementById('chat-section');
+  const roomIdRow = document.getElementById('room-id-row');
+  const roomIdInChat = document.getElementById('room-id-in-chat');
+  const copyIdChatBtn = document.getElementById('copy-id-chat-btn');
   const participantsLabel = document.getElementById('participants-label');
   const leaveBtn = document.getElementById('leave-btn');
 
@@ -564,6 +577,9 @@
       createRoomBtn.textContent = 'Raum erstellt ✓';
       setStatus('waiting', 'Warte auf Teilnehmer...');
       showChatUI();
+      // Raum-ID dauerhaft im Chat-Header anzeigen, damit sie nicht verschwindet
+      roomIdInChat.textContent = id;
+      roomIdRow.style.display = 'inline-flex';
       updateParticipantsLabel();
       addMessage('Raum erstellt. Teile die Raum-ID, damit andere beitreten können.', 'system');
     });
@@ -626,6 +642,13 @@
       if (peerId !== excludePeerId && c.open) c.send(data);
     });
   }
+
+  copyIdChatBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(roomIdInChat.textContent).then(() => {
+      copyIdChatBtn.textContent = '✓';
+      setTimeout(() => (copyIdChatBtn.textContent = 'Kopieren'), 1200);
+    });
+  });
 
   copyIdBtn.addEventListener('click', () => {
     navigator.clipboard.writeText(myIdDisplay.textContent).then(() => {
@@ -763,6 +786,7 @@
     joinRoomBtn.disabled = false;
     joinRoomBtn.textContent = 'Raum beitreten';
     myIdBox.style.display = 'none';
+    roomIdRow.style.display = 'none';
     resetToSetup();
   });
 
